@@ -697,6 +697,117 @@ _start() {
   fi
 }
 
+# ─── Prompt Enrichment (auto-inject project context into messages) ───
+
+# Build context prefix from project state, git info, and recent worker output
+_build_context() {
+  local name="$1"
+  local dir="${PROJECTS[$name]}"
+  local ctx=""
+
+  # 1. Project type & path
+  local ptype=$(_state_get "$name" "project_type")
+  [[ -n "$ptype" && "$ptype" != "unknown" ]] && ctx+="[Project: $ptype] "
+  ctx+="[Path: ${dir/$HOME/~}] "
+
+  # 2. Git state (branch, uncommitted changes, ahead count)
+  if [[ -d "$dir/.git" ]]; then
+    local branch=$(git -C "$dir" branch --show-current 2>/dev/null || echo "?")
+    local uncommitted=$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    local ahead=$(git -C "$dir" rev-list --count @{u}..HEAD 2>/dev/null || echo 0)
+    ctx+="[Git: $branch"
+    (( uncommitted > 0 )) && ctx+=", ${uncommitted} uncommitted"
+    (( ahead > 0 )) && ctx+=", ${ahead} ahead"
+    ctx+="] "
+  fi
+
+  # 3. Last action & next todo from persistent state
+  local last=$(_state_get "$name" "last_action")
+  local last_at=$(_state_get "$name" "last_at")
+  local todo=$(_state_get "$name" "next_todo")
+  local blockers=$(_state_get "$name" "blockers")
+
+  if [[ -n "$last" ]]; then
+    ctx+="[Previous session: $last"
+    [[ -n "$last_at" ]] && ctx+=" ($last_at)"
+    ctx+="] "
+  fi
+  [[ -n "$todo" ]] && ctx+="[Pending task: $todo] "
+  [[ -n "$blockers" ]] && ctx+="[Blockers: $blockers] "
+
+  # 4. Recent worker output (last 5 meaningful lines — if Claude is running)
+  if _has_window "$name" 2>/dev/null; then
+    local pane_cmd=$(tmux list-panes -t "$ORCH_SESSION:$name" -F "#{pane_current_command}" 2>/dev/null | head -1)
+    if [[ "$pane_cmd" =~ $CLAUDE_PROC_PATTERN ]]; then
+      local recent=$(tmux capture-pane -t "$ORCH_SESSION:$name" -p -S -10 2>/dev/null | \
+        sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\xc2\xa0' | sed 's/[[:cntrl:]]//g' | \
+        grep -v '^[[:space:]]*$' | tail -5)
+      if [[ -n "$recent" ]]; then
+        ctx+="[Recent output: $recent] "
+      fi
+    fi
+  fi
+
+  echo "$ctx"
+}
+
+# Enrich a message with project context, then send via _send
+_enrich() {
+  local name="$1"
+  shift
+  local msg="$*"
+
+  if [[ -z "$name" || -z "$msg" ]]; then
+    echo "Usage: dev enrich <project> <message>"
+    echo "  Enriches the message with project context (state, git, recent output)"
+    echo "  then sends it to the worker. Like 'dev send' but with auto-context."
+    return 1
+  fi
+
+  if [[ -z "${PROJECTS[$name]}" ]]; then
+    echo "Unknown project: $name — run 'dev list'"
+    return 1
+  fi
+
+  # Build context
+  local context=$(_build_context "$name")
+
+  # Assemble enriched message
+  local enriched="CONTEXT: ${context}--- TASK: ${msg}"
+
+  echo "--- Enriched prompt for $name ---"
+  echo "  Context: ${context:0:200}$([ ${#context} -gt 200 ] && echo '...')"
+  echo "  Task: ${msg:0:120}$([ ${#msg} -gt 120 ] && echo '...')"
+  echo "---"
+
+  # Send via existing _send (handles long messages, logging, etc.)
+  _send "$name" "$enriched"
+}
+
+# Enrich + broadcast to all active Claude windows
+_enrich_broadcast() {
+  local msg="$*"
+  if [[ -z "$msg" ]]; then
+    echo "Usage: dev enrich-broadcast <message>"
+    return 1
+  fi
+
+  local count=0
+  if tmux has-session -t "$ORCH_SESSION" 2>/dev/null; then
+    local windows=$(tmux list-windows -t "$ORCH_SESSION" -F "#{window_name}" 2>/dev/null)
+    while IFS= read -r wname; do
+      [[ "$wname" == "orchestra" ]] && continue
+      local pane_cmd=$(tmux list-panes -t "$ORCH_SESSION:$wname" -F "#{pane_current_command}" 2>/dev/null | head -1)
+      if [[ "$pane_cmd" =~ $CLAUDE_PROC_PATTERN ]]; then
+        _enrich "$wname" "$msg"
+        count=$((count + 1))
+        sleep 0.2
+      fi
+    done <<< "$windows"
+  fi
+  echo "Enriched broadcast to $count workers."
+}
+
 # Send a message to a Claude window
 _send() {
   local name="$1"
@@ -1095,6 +1206,8 @@ case "$1" in
   claude|cc)      _claude "$2" ;;
   start)          _start "$2" ;;
   send)           _send "$2" "${@:3}" ;;
+  enrich)         _enrich "$2" "${@:3}" ;;
+  enrich-broadcast) _enrich_broadcast "${@:2}" ;;
   status)         _status ;;
   health)         _health ;;
   state)          _state "$2" "$3" "$4" "${@:5}" ;;
@@ -1125,6 +1238,8 @@ case "$1" in
     echo "  dev orchestra              Start orchestrator (master session)"
     echo "  dev start <project>        Start Claude in a window (max $MAX_CLAUDE_SESSIONS)"
     echo "  dev send <project> <msg>   Send message to project's Claude"
+    echo "  dev enrich <project> <msg> Send with auto-injected context (state+git+output)"
+    echo "  dev enrich-broadcast <msg> Enriched send to all active Claude workers"
     echo "  dev peek <project> [lines] Read worker's recent output"
     echo "  dev broadcast <msg>        Send to all active Claude sessions"
     echo "  dev status                 Show all windows and their status"

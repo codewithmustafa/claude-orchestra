@@ -23,6 +23,8 @@ The user tells you what they need done across projects. You start worker session
 ```bash
 ~/.local/bin/dev start <alias>           # Start a Claude session (creates a tmux window + launches Claude)
 ~/.local/bin/dev send <alias> "message"  # Send a task/message to a worker Claude
+~/.local/bin/dev enrich <alias> "message"  # Send with auto-injected context (state, git, recent output)
+~/.local/bin/dev enrich-broadcast "message"  # Enriched send to ALL active Claude sessions
 ~/.local/bin/dev peek <alias>            # Read worker's recent output (last 50 lines)
 ~/.local/bin/dev peek <alias> 100        # Read last 100 lines
 ~/.local/bin/dev broadcast "message"     # Send same message to ALL active Claude sessions
@@ -71,6 +73,23 @@ Track what was done, where we left off, what's next — survives session crashes
 **After every significant worker completion:** Run `dev state log <project> "what was done"` to persist progress.
 **After context compact:** Run `dev state show --all` to restore context.
 **Before planning:** Run `dev analyze --all` to see live project health.
+
+## Prompt Enrichment
+
+Use `dev enrich` instead of `dev send` when the worker needs full project context. It auto-injects:
+- **Project type & path** — worker knows what kind of project it's in
+- **Git state** — branch, uncommitted changes, ahead count
+- **Previous session** — last action, pending task, blockers from persistent state
+- **Recent output** — last 5 lines from the worker's screen (if running)
+
+The enriched message format sent to the worker:
+```
+CONTEXT: [Project: flutter] [Path: ~/myapp] [Git: main, 3 uncommitted] [Previous session: Fixed login bug (2026-03-28)] [Pending task: Run test suite] --- TASK: <your actual message>
+```
+
+**When to use `enrich` vs `send`:**
+- `dev enrich` — worker needs background context (new task, resuming after break, complex multi-step work)
+- `dev send` — simple follow-up where worker already has context (e.g., "now run the tests")
 
 ## Task Lifecycle (CRITICAL — follow this for EVERY task, NO EXCEPTIONS)
 
