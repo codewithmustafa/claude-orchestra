@@ -74,22 +74,74 @@ Track what was done, where we left off, what's next — survives session crashes
 **After context compact:** Run `dev state show --all` to restore context.
 **Before planning:** Run `dev analyze --all` to see live project health.
 
-## Prompt Enrichment
+## Prompt Enrichment Protocol (CRITICAL — apply to EVERY message to workers)
 
-Use `dev enrich` instead of `dev send` when the worker needs full project context. It auto-injects:
-- **Project type & path** — worker knows what kind of project it's in
-- **Git state** — branch, uncommitted changes, ahead count
-- **Previous session** — last action, pending task, blockers from persistent state
-- **Recent output** — last 5 lines from the worker's screen (if running)
+You are a prompt amplifier. The user gives you short, human instructions. Workers receive ZERO context from this conversation. Your job is to transform every user instruction into a self-contained, actionable task before sending it to a worker.
 
-The enriched message format sent to the worker:
+### Before composing any message to a worker, ALWAYS gather:
+
+1. **Run `dev state show <project>`** — get last action, pending task, blockers
+2. **Run `dev analyze <project>`** — get git branch, uncommitted changes, open issues/PRs
+3. **If worker is already running, run `dev peek <project> 10`** — get recent output for continuity
+
+### Then compose the message using this structure:
+
 ```
-CONTEXT: [Project: flutter] [Path: ~/myapp] [Git: main, 3 uncommitted] [Previous session: Fixed login bug (2026-03-28)] [Pending task: Run test suite] --- TASK: <your actual message>
+CONTEXT:
+- Project: <type> at <path>
+- Branch: <branch> (<N> uncommitted, <N> ahead)
+- Previous: <last action from state>
+- Pending: <next_todo from state, if any>
+- Blockers: <blockers from state, if any>
+- Recent output: <last meaningful lines from peek, if any>
+
+TASK:
+<What to do — specific, not vague>
+
+FILES:
+<Exact file paths and line numbers when known — e.g. src/auth/login.ts:45-67>
+
+EXPECTED RESULT:
+<What success looks like — observable behavior, not abstract goals>
+
+VERIFY:
+<Command to run to confirm the task is done — e.g. npm test, flutter analyze, git diff>
 ```
 
-**When to use `enrich` vs `send`:**
-- `dev enrich` — worker needs background context (new task, resuming after break, complex multi-step work)
-- `dev send` — simple follow-up where worker already has context (e.g., "now run the tests")
+### Enrichment rules:
+
+- **NEVER send a bare user message.** Always enrich. "Fix the bug" → full context + file + expected behavior + verify command.
+- **NEVER invent context.** Only include what you gathered from `dev state`, `dev analyze`, `dev peek`, or the user's own words. If you don't know a file path, say "Find and identify the relevant file" — don't guess.
+- **Skip sections that don't apply.** No blockers? Omit that line. No recent output? Omit. Don't pad with empty fields.
+- **Keep TASK under 3 sentences.** Be direct. Workers are Claude — they understand concise instructions.
+- **For follow-up messages** (worker already has context from a previous message in the same session): skip CONTEXT, just send TASK + VERIFY. Don't re-inject everything on every follow-up.
+
+### Examples:
+
+**User says:** "myapp'teki login bug'ını düzelt"
+
+**You gather:**
+```bash
+dev state show myapp    → Last: Added OAuth flow. Next: Fix token refresh
+dev analyze myapp       → flutter, main branch, 2 uncommitted
+```
+
+**You send:**
+```
+dev send myapp "CONTEXT: - Project: flutter at ~/myapp - Branch: main (2 uncommitted) - Previous: Added OAuth flow - Pending: Fix token refresh  TASK: The session token is not refreshed when it expires. Find the token refresh logic and fix it so expired tokens trigger a silent refresh instead of logging the user out.  FILES: Check lib/auth/ directory, likely in auth_service.dart or token_manager.dart  EXPECTED RESULT: User stays logged in when token expires. No visible interruption.  VERIFY: flutter test test/auth/"
+```
+
+**User says:** "testleri çalıştır" (follow-up, worker already working on myapp)
+
+**You send:**
+```
+dev send myapp "Run the full test suite and report any failures: flutter test"
+```
+No context block needed — worker already has it.
+
+### Shortcut: `dev enrich`
+
+`dev enrich <project> "message"` auto-injects state + git + recent output. Use it when you want the script to handle context gathering. Use manual enrichment (above protocol) when you need to add file paths, error messages, or acceptance criteria that the script can't know.
 
 ## Task Lifecycle (CRITICAL — follow this for EVERY task, NO EXCEPTIONS)
 
@@ -106,7 +158,7 @@ CONTEXT: [Project: flutter] [Path: ~/myapp] [Git: main, 3 uncommitted] [Previous
 
 - **Max 3 active Claude sessions.** The script enforces this, but also check with `dev status`.
 - **Use `dev list` for project registry.** No hardcoded project list — `dev list` is the single source of truth.
-- **Include full context in every message to workers.** Workers have zero knowledge of this conversation. Include: file paths, error messages, expected behavior, acceptance criteria. Never send vague messages like "fix the bug."
+- **Include full context in every message to workers.** Follow the Prompt Enrichment Protocol above. Workers have zero knowledge of this conversation. Never send vague messages like "fix the bug."
 - **`dev send` only works on windows running Claude.** It will error if Claude is not running.
 - **`dev broadcast` only targets Claude windows.** Shell-only windows are automatically skipped.
 - **`dev start` waits for readiness.** It polls until Claude is running and reports the window number.
